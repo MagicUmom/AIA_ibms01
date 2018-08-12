@@ -1,0 +1,191 @@
+##importing packages 
+import numpy as np
+import csv
+import plotly.plotly as py
+import plotly.graph_objs as go
+import plotly
+from plotly.graph_objs import Scatter, Layout
+
+##functions 
+#function for reading data
+def readFile(entity, strip=None):
+    with open(entity,'r') as f:
+        data = np.asarray([l.strip(strip).split('\t') for l in f])
+    return data
+
+#function for matching data
+def match(seq1, seq2):
+    '''Finds the index locations of seq1 in seq2'''
+    return [ np.nonzero(seq2==x)[0][0] for x in seq1  if x in seq2 ]
+
+#function for analyzing data
+def analyze(testLabels,trainLabels,data,survival,repetingTimes):
+    
+    #printout test label
+    print('Test sets :\n')
+    print(testLabels)
+    print('\n')
+
+    #printout train label
+    print('Train sets :\n')
+    print(trainLabels)
+    print('\n')
+
+    #printout input data of target set
+    print('Input sets :\n')
+    print(data)
+    print('\n')
+
+    #printout output data of target set
+    print('Output sets :\n')
+    print(survival)
+    print('\n')
+
+    #filtering the data
+    samples=data[1:,0]
+    data=data[1:,1:].astype(np.float).T
+    survTime = survival[1:,1].astype(np.int)
+    survStatus = survival[1:,2].astype(np.int)
+ 
+    ##Invoking the R-language by rpy2 interphase
+    %load_ext rpy2.ipython
+    
+    #importing necessary R-packages
+    %R require(survival); require(randomForestSRC); require(survcomp)
+    
+    #building a list space for all models
+    predictionSets = []
+    
+    #building a list space for all concordances
+    concordanceSet = []
+    
+    #building models and their C-indices   
+    print('\n')    
+    print('Results :')
+    print('\n')
+    for bootstrapIdx in range(repetingTimes):
+
+        #building a list space for a model
+        predictions = []
+
+        #searching and memorizing the indices of each train- or test-set in each sample name
+        trainIdx = match(trainLabels[:,bootstrapIdx], samples)   
+        testIdx = match(testLabels[:,bootstrapIdx], samples)
+
+        #verifying that all the memorized indices corresponds to the right sample name data
+        assert (np.all(trainLabels[:,bootstrapIdx]==samples[trainIdx]) and 
+                np.all(testLabels[:,bootstrapIdx]==samples[testIdx]))
+
+        #Exctracting train and test data sets
+        trainData = data[:, trainIdx].T
+        trainSurvStatus = survStatus[trainIdx]
+        trainSurvTime = survTime[trainIdx]
+        testData = data[:, testIdx].T
+        testSurvStatus = survStatus[testIdx]
+        testSurvTime = survTime[testIdx]
+              
+        #pushing train and test data sets to R-language for modeling and predicting
+        %Rpush trainData trainSurvStatus trainSurvTime testData testSurvStatus testSurvTime
+
+        #modeling by random survival forest
+        %R rsf.model.fit <- rfsrc(Surv(time,status)~., data=data.frame(time=trainSurvTime, status=trainSurvStatus, trainData), ntree=1000, na.action='na.impute', splitrule='logrank', nsplit=1, seed=1, outcome = 'test')
+    
+        #predictions made by built model above
+        %R -o predictedResponse predictedResponse <- predict(rsf.model.fit, data.frame(testData), na.action='na.impute')$predicted
+        
+        #evaluating the model by the made predictions above through the C-index
+        %R -o concordance concordance <- concordance.index(predictedResponse, testSurvTime, testSurvStatus)$c.index
+        
+        #adjusting the type of data for printing
+        concordanceSet.append(np.asarray(concordance).T)
+        predictions.append(predictedResponse)
+        predictions = np.asarray(predictions).T
+        predictionSets.append(predictions)
+    
+    #printing the predicting results from built-models    
+    print ('Predictions from Models :') 
+    print('\n')
+    predictionSets = np.asarray(predictionSets).T
+    print (predictionSets[0])
+    print('\n')
+    
+    #printing the C-index results from built-models   
+    print ('C-index set :') 
+    print('\n')
+    concordanceSet = np.asarray(concordanceSet).T
+    print(concordanceSet[0])
+    print('\n')
+    #returing the C-index sets from repeting
+    return concordanceSet[0]
+
+
+
+
+
+
+
+
+
+##importing and analyzing files
+y1 = analyze(readFile('gbm_test_sample_list.txt'),readFile('gbm_train_sample_list.txt'),readFile('gbm_cnv_core.txt'),readFile('gbm_os_core.txt'),100)
+
+
+
+
+
+
+
+
+
+
+
+##plotting BOXPLOT by Plotly
+#selecting the style of labels
+x_data = ['cnv']
+y_data = [y1]
+colors = ['rgba(93, 164, 214, 0.5)', 'rgba(255, 144, 14, 0.5)', 'rgba(44, 160, 101, 0.5)', 'rgba(255, 65, 54, 0.5)', 'rgba(207, 114, 255, 0.5)']
+traces = []
+
+#selecting the style of layout
+layout = go.Layout(
+    title='C-index in GBM Cancer Types from Different Training Data Sets by Raindom Survival Forest',
+    yaxis=dict(
+        autorange=True,
+        showgrid=True,
+        zeroline=True,
+        dtick=5,
+        gridcolor='rgb(255, 255, 255)',
+        gridwidth=1,
+        zerolinecolor='rgb(255, 255, 255)',
+        zerolinewidth=2,
+    ),
+    margin=dict(
+        l=40,
+        r=30,
+        b=80,
+        t=100,
+    ),
+    paper_bgcolor='rgb(243, 243, 243)',
+    plot_bgcolor='rgb(243, 243, 243)',
+    showlegend=False
+)
+
+#plotting the BOXPLOT for data
+for xd, yd, cls in zip(x_data, y_data, colors):
+        traces.append(go.Box(
+            y=yd,
+            name=xd,
+            boxpoints='all',
+            jitter=0.5,
+            whiskerwidth=0.2,
+            fillcolor=cls,
+            marker=dict(
+                size=2,
+            ),
+            line=dict(width=1),
+        ))
+
+#demonstrating the plot
+fig = go.Figure(data=traces, layout=layout)
+plotly.offline.init_notebook_mode(connected=True)
+plotly.offline.plot(fig)
